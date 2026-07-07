@@ -58,11 +58,12 @@ type Props = {
 const ALLOWED_USERNAMES = new Set<string>([
 	// Add GitHub usernames of users who should have access to the image generation tool
 	// For example: 'yourusername', 'coworkerusername'
+	'superjeffc'
 ]);
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
-		name: "Github OAuth Proxy Demo",
+		name: "superjeffc",
 		version: "1.0.0",
 	});
 
@@ -235,8 +236,8 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 				for (const q of queriesToTry) {
 					try {
 						data = await queryCloudflareGraphQL(activeToken, q.query, variables);
-						// Ensure we got a valid response with zone data
-						if (data?.viewer?.zones?.[0]?.[q.source]?.[0]) {
+						// Ensure we got a valid response with zone data structure
+						if (data?.viewer?.zones?.[0]?.[q.source]) {
 							activeSource = q.source;
 							activeHasLatency = q.hasLatency;
 							break;
@@ -259,7 +260,18 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 				}
 
 				const zoneData = data.viewer.zones[0];
-				const metricsGroup = zoneData[activeSource][0];
+				const metricsGroup = zoneData[activeSource]?.[0];
+
+				if (!metricsGroup) {
+					return {
+						content: [
+							{
+								text: `No analytics data found for Zone ID "${activeZoneId}" in the last ${hours} hours. Please make sure the Zone ID is correct and the domain has traffic.`,
+								type: "text",
+							},
+						],
+					};
+				}
 
 				const count = metricsGroup.count || 0;
 				const sum = metricsGroup.sum || {};

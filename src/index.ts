@@ -398,10 +398,21 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 					ebirdApiToken: z
 						.string()
 						.optional()
-						.describe("Optional eBird API token. If not provided, the server's EBIRD_API_TOKEN env var/secret or default fallback will be used.")
+						.describe("Optional eBird API token. If not provided, the server's EBIRD_API_TOKEN env var/secret will be used.")
 				},
 				async ({ lat, lng, dist = 25, back = 14, maxResults = 50, ebirdApiToken }) => {
-					const activeToken = ebirdApiToken || this.env.EBIRD_API_TOKEN || "";
+					const activeToken = ebirdApiToken || this.env.EBIRD_API_TOKEN;
+					if (!activeToken) {
+						return {
+							content: [
+								{
+									text: "eBird API token is missing. Please configure EBIRD_API_TOKEN as a secret or pass it directly to the tool.",
+									type: "text"
+								}
+							],
+							isError: true
+						};
+					}
 					
 					const url = new URL("https://api.ebird.org/v2/data/obs/geo/recent");
 					url.searchParams.set("lat", lat.toFixed(4));

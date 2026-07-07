@@ -13,6 +13,7 @@ declare global {
 		CF_API_TOKEN?: string;
 		CF_ZONE_ID?: string;
 		EBIRD_API_TOKEN?: string;
+		USDA_API_KEY?: string;
 	}
 }
 
@@ -476,6 +477,152 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 						content: [
 							{
 								text: resultText,
+								type: "text"
+							}
+						]
+					};
+				}
+			);
+
+			this.server.tool(
+				"searchFood",
+				"Search for food items in the USDA FoodData Central database.",
+				{
+					query: z.string().describe("Keyword search for foods (e.g., 'Cheddar cheese')."),
+					dataType: z
+						.array(z.string())
+						.optional()
+						.describe("Optional list of food types to filter by (e.g., ['Branded', 'Foundation', 'SR Legacy'])."),
+					pageSize: z
+						.number()
+						.min(1)
+						.max(200)
+						.optional()
+						.describe("Number of results to return per page (default is 50)."),
+					pageNumber: z
+						.number()
+						.min(1)
+						.optional()
+						.describe("The page number to retrieve."),
+					apiKey: z
+						.string()
+						.optional()
+						.describe("Optional USDA API key. If not provided, the USDA_API_KEY environment variable/secret will be used.")
+				},
+				async ({ query, dataType, pageSize, pageNumber, apiKey }) => {
+					const activeKey = apiKey || this.env.USDA_API_KEY;
+					if (!activeKey) {
+						return {
+							content: [
+								{
+									text: "USDA API Key is missing. Please configure USDA_API_KEY as a secret or pass it directly to the tool.",
+									type: "text"
+								}
+							],
+							isError: true
+						};
+					}
+
+					const url = new URL("https://api.nal.usda.gov/fdc/v1/foods/search");
+					url.searchParams.set("api_key", activeKey);
+
+					const body: Record<string, any> = { query };
+					if (dataType) body.dataType = dataType;
+					if (pageSize !== undefined) body.pageSize = pageSize;
+					if (pageNumber !== undefined) body.pageNumber = pageNumber;
+
+					const response = await fetch(url.toString(), {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json"
+						},
+						body: JSON.stringify(body)
+					});
+
+					if (!response.ok) {
+						const text = await response.text();
+						return {
+							content: [
+								{
+									text: `USDA FoodData Central API error (${response.status}): ${text}`,
+									type: "text"
+								}
+							],
+							isError: true
+						};
+					}
+
+					const data = await response.json();
+					return {
+						content: [
+							{
+								text: JSON.stringify(data, null, 2),
+								type: "text"
+							}
+						]
+					};
+				}
+			);
+
+			this.server.tool(
+				"getFoodDetails",
+				"Retrieve detailed food composition and nutrients for a given fdcId from the USDA FoodData Central database.",
+				{
+					fdcId: z.number().describe("The unique FoodData Central ID (fdcId) for the food item."),
+					format: z
+						.enum(["abridged", "full"])
+						.default("abridged")
+						.describe("The response format: 'abridged' or 'full'. 'abridged' provides a concise list of nutrients, 'full' contains complete details."),
+					nutrients: z
+						.array(z.number())
+						.optional()
+						.describe("Optional list of up to 25 specific nutrient numbers to include."),
+					apiKey: z
+						.string()
+						.optional()
+						.describe("Optional USDA API key. If not provided, the USDA_API_KEY environment variable/secret will be used.")
+				},
+				async ({ fdcId, format, nutrients, apiKey }) => {
+					const activeKey = apiKey || this.env.USDA_API_KEY;
+					if (!activeKey) {
+						return {
+							content: [
+								{
+									text: "USDA API Key is missing. Please configure USDA_API_KEY as a secret or pass it directly to the tool.",
+									type: "text"
+								}
+							],
+							isError: true
+						};
+					}
+
+					const url = new URL(`https://api.nal.usda.gov/fdc/v1/food/${fdcId}`);
+					url.searchParams.set("api_key", activeKey);
+					url.searchParams.set("format", format);
+					if (nutrients && nutrients.length > 0) {
+						url.searchParams.set("nutrients", nutrients.join(","));
+					}
+
+					const response = await fetch(url.toString());
+
+					if (!response.ok) {
+						const text = await response.text();
+						return {
+							content: [
+								{
+									text: `USDA FoodData Central API error (${response.status}): ${text}`,
+									type: "text"
+								}
+							],
+							isError: true
+						};
+					}
+
+					const data = await response.json();
+					return {
+						content: [
+							{
+								text: JSON.stringify(data, null, 2),
 								type: "text"
 							}
 						]

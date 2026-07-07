@@ -132,36 +132,59 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 					end: end.toISOString(),
 				};
 
-				// We try httpRequestsAdaptiveGroups first, and if that fails, we try httpRequests1hGroups as a fallback
-				let data;
-				let source = "httpRequestsAdaptiveGroups";
-				try {
-					const query = `
-						query GetTrafficStats($zoneTag: string!, $start: Time!, $end: Time!) {
-							viewer {
-								zones(filter: { zoneTag: $zoneTag }) {
-									httpRequestsAdaptiveGroups(
-										filter: { datetime_geq: $start, datetime_leq: $end }
-										limit: 1
-									) {
-										count
-										sum {
-											edgeResponseBytes
-											visits
-											edgeTimeToFirstByteMs
+				// We try queries in order of granularity and metric richness, falling back if they fail
+				// (e.g. if the plan does not support edgetimetofirstbytems, or if httpRequestsAdaptiveGroups is not available)
+				const queriesToTry = [
+					{
+						source: "httpRequestsAdaptiveGroups",
+						hasLatency: true,
+						query: `
+							query GetTrafficStats1($zoneTag: String!, $start: Time!, $end: Time!) {
+								viewer {
+									zones(filter: { zoneTag: $zoneTag }) {
+										httpRequestsAdaptiveGroups(
+											filter: { datetime_geq: $start, datetime_leq: $end }
+											limit: 1
+										) {
+											count
+											sum {
+												edgeResponseBytes
+												visits
+												edgeTimeToFirstByteMs
+											}
 										}
 									}
 								}
 							}
-						}
-					`;
-					data = await queryCloudflareGraphQL(activeToken, query, variables);
-				} catch (adaptiveError: any) {
-					// Fall back to httpRequests1hGroups
-					source = "httpRequests1hGroups";
-					try {
-						const fallbackQuery = `
-							query GetTrafficStatsFallback($zoneTag: string!, $start: Time!, $end: Time!) {
+						`
+					},
+					{
+						source: "httpRequestsAdaptiveGroups",
+						hasLatency: false,
+						query: `
+							query GetTrafficStats2($zoneTag: String!, $start: Time!, $end: Time!) {
+								viewer {
+									zones(filter: { zoneTag: $zoneTag }) {
+										httpRequestsAdaptiveGroups(
+											filter: { datetime_geq: $start, datetime_leq: $end }
+											limit: 1
+										) {
+											count
+											sum {
+												edgeResponseBytes
+												visits
+											}
+										}
+									}
+								}
+							}
+						`
+					},
+					{
+						source: "httpRequests1hGroups",
+						hasLatency: true,
+						query: `
+							query GetTrafficStats3($zoneTag: String!, $start: Time!, $end: Time!) {
 								viewer {
 									zones(filter: { zoneTag: $zoneTag }) {
 										httpRequests1hGroups(
@@ -178,41 +201,77 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 									}
 								}
 							}
-						`;
-						data = await queryCloudflareGraphQL(activeToken, fallbackQuery, variables);
-					} catch (fallbackError: any) {
-						return {
-							content: [
-								{
-									text: `Failed to retrieve domain statistics.\n\nAdaptive query error: ${adaptiveError.message}\n\nFallback query error: ${fallbackError.message}`,
-									type: "text",
-								},
-							],
-							isError: true,
-						};
+						`
+					},
+					{
+						source: "httpRequests1hGroups",
+						hasLatency: false,
+						query: `
+							query GetTrafficStats4($zoneTag: String!, $start: Time!, $end: Time!) {
+								viewer {
+									zones(filter: { zoneTag: $zoneTag }) {
+										httpRequests1hGroups(
+											filter: { datetime_geq: $start, datetime_leq: $end }
+											limit: 1
+										) {
+											count
+											sum {
+												edgeResponseBytes
+												visits
+											}
+										}
+									}
+								}
+							}
+						`
+					}
+				];
+
+				let data: any = null;
+				let activeSource = "";
+				let activeHasLatency = false;
+				const errors: string[] = [];
+
+				for (const q of queriesToTry) {
+					try {
+						data = await queryCloudflareGraphQL(activeToken, q.query, variables);
+						// Ensure we got a valid response with zone data
+						if (data?.viewer?.zones?.[0]?.[q.source]?.[0]) {
+							activeSource = q.source;
+							activeHasLatency = q.hasLatency;
+							break;
+						}
+					} catch (e: any) {
+						errors.push(`${q.source} (${q.hasLatency ? "with latency" : "no latency"}): ${e.message}`);
 					}
 				}
 
-				const zoneData = data?.viewer?.zones?.[0];
-				const metricsGroup = zoneData?.[source]?.[0];
-
-				if (!zoneData || !metricsGroup) {
+				if (!activeSource || !data) {
 					return {
 						content: [
 							{
-								text: `No analytics data found for Zone ID "${activeZoneId}" in the last ${hours} hours. Please make sure the Zone ID is correct and the domain has traffic.`,
+								text: `Failed to retrieve domain statistics after trying all query fallbacks.\n\nErrors encountered:\n${errors.map(err => `- ${err}`).join("\n")}`,
 								type: "text",
 							},
 						],
+						isError: true,
 					};
 				}
+
+				const zoneData = data.viewer.zones[0];
+				const metricsGroup = zoneData[activeSource][0];
 
 				const count = metricsGroup.count || 0;
 				const sum = metricsGroup.sum || {};
 				const visits = sum.visits || 0;
 				const bytes = sum.edgeResponseBytes || 0;
-				const latencySumMs = sum.edgeTimeToFirstByteMs || 0;
-				const avgLatencyMs = count > 0 ? (latencySumMs / count).toFixed(2) : "0.00";
+
+				let latencyStr = "Not available on Free plan (requires Pro/Business/Enterprise)";
+				if (activeHasLatency) {
+					const latencySumMs = sum.edgeTimeToFirstByteMs || 0;
+					const avgLatencyMs = count > 0 ? (latencySumMs / count).toFixed(2) : "0.00";
+					latencyStr = `${avgLatencyMs} ms`;
+				}
 
 				// Format bandwidth nicely
 				let bandwidthStr = `${bytes} B`;
@@ -226,11 +285,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
 				const resultText = [
 					`### Domain Statistics (Last ${hours} Hours)`,
-					`* **Source Dataset**: \`${source}\``,
+					`* **Source Dataset**: \`${activeSource}\``,
 					`* **Total Requests**: ${count.toLocaleString()}`,
 					`* **Page Visits (Views)**: ${visits.toLocaleString()}`,
 					`* **Bandwidth Transferred**: ${bandwidthStr}`,
-					`* **Average Latency (TTFB)**: ${avgLatencyMs} ms`,
+					`* **Average Latency (TTFB)**: ${latencyStr}`,
 				].join("\n");
 
 				return {

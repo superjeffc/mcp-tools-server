@@ -12,6 +12,7 @@ declare global {
 		GITHUB_CLIENT_SECRET: string;
 		CF_API_TOKEN?: string;
 		CF_ZONE_ID?: string;
+		EBIRD_API_TOKEN?: string;
 	}
 }
 
@@ -360,6 +361,115 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 						content: [{ data: response.image!, mimeType: "image/jpeg", type: "image" }],
 					};
 				},
+			);
+
+			this.server.tool(
+				"getNearbyBirds",
+				"Get recent bird observations near a specific location using the eBird API.",
+				{
+					lat: z
+						.number()
+						.min(-90)
+						.max(90)
+						.describe("Latitude of the location (-90 to 90)."),
+					lng: z
+						.number()
+						.min(-180)
+						.max(180)
+						.describe("Longitude of the location (-180 to 180)."),
+					dist: z
+						.number()
+						.min(0)
+						.max(50)
+						.optional()
+						.describe("Search radius in kilometers (0 to 50, default is 25)."),
+					back: z
+						.number()
+						.min(1)
+						.max(30)
+						.optional()
+						.describe("Number of days back to search (1 to 30, default is 14)."),
+					maxResults: z
+						.number()
+						.min(1)
+						.max(500)
+						.optional()
+						.describe("Maximum number of results to return (default is 50)."),
+					ebirdApiToken: z
+						.string()
+						.optional()
+						.describe("Optional eBird API token. If not provided, the server's EBIRD_API_TOKEN env var/secret or default fallback will be used.")
+				},
+				async ({ lat, lng, dist = 25, back = 14, maxResults = 50, ebirdApiToken }) => {
+					const activeToken = ebirdApiToken || this.env.EBIRD_API_TOKEN || "";
+					
+					const url = new URL("https://api.ebird.org/v2/data/obs/geo/recent");
+					url.searchParams.set("lat", lat.toFixed(4));
+					url.searchParams.set("lng", lng.toFixed(4));
+					url.searchParams.set("dist", String(dist));
+					url.searchParams.set("back", String(back));
+					url.searchParams.set("maxResults", String(maxResults));
+
+					const response = await fetch(url.toString(), {
+						headers: {
+							"x-ebirdapitoken": activeToken
+						}
+					});
+
+					if (!response.ok) {
+						const text = await response.text();
+						return {
+							content: [
+								{
+									text: `eBird API error (${response.status}): ${text}`,
+									type: "text"
+								}
+							],
+							isError: true
+						};
+					}
+
+					const observations = (await response.json()) as Array<{
+						speciesCode: string;
+						comName: string;
+						sciName: string;
+						locName: string;
+						obsDt: string;
+						howMany?: number;
+					}>;
+
+					if (!observations || observations.length === 0) {
+						return {
+							content: [
+								{
+									text: `No recent bird observations found near latitude ${lat}, longitude ${lng} within ${dist} km.`,
+									type: "text"
+								}
+							]
+						};
+					}
+
+					const formatted = observations.map((obs) => {
+						const countStr = obs.howMany !== undefined ? ` (Count: ${obs.howMany})` : "";
+						return `* **${obs.comName}** (*${obs.sciName}*)${countStr}\n  Seen at: ${obs.locName} on ${obs.obsDt}`;
+					}).join("\n");
+
+					const resultText = [
+						`### Recent Bird Observations (Within ${dist} km, past ${back} days)`,
+						`Found ${observations.length} observations:`,
+						"",
+						formatted
+					].join("\n");
+
+					return {
+						content: [
+							{
+								text: resultText,
+								type: "text"
+							}
+						]
+					};
+				}
 			);
 		}
 	}

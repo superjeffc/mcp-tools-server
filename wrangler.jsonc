@@ -1,0 +1,46 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "my-mcp-oauth-server",
+    "main": "src/index.ts",
+    "compatibility_date": "2025-03-10",
+    "compatibility_flags": [
+        "nodejs_compat",
+        "global_fetch_strictly_public"
+    ],
+    "durable_objects": {
+        "bindings": [
+            {
+                "name": "MCP_OBJECT",
+                "class_name": "MyMCP"
+            }
+        ]
+    },
+    "migrations": [
+        {
+            "tag": "v1",
+            "new_sqlite_classes": [
+                "MyMCP"
+            ]
+        }
+    ],
+    "kv_namespaces": [
+        {
+            "binding": "OAUTH_KV",
+            "id": "7154c0904bf54839b91bb1018e704f81"
+        }
+    ],
+    "ai": {
+        "binding": "AI"
+    },
+    "observability": {
+        "enabled": true
+    },
+    "dev": {
+        "port": 8788
+    },
+    "upload_source_maps": true
+}

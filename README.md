@@ -1,160 +1,252 @@
-# Model Context Protocol (MCP) Server + Github OAuth
+# Remote Model Context Protocol (MCP) Server with GitHub OAuth
 
-This is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) server that supports remote MCP connections, with Github OAuth built-in.
+A production-grade, serverless Remote Model Context Protocol (MCP) server built on Cloudflare Workers and Durable Objects. This application acts as a secure bridge between AI client interfaces (such as Claude Desktop, Cursor, and Windsurf) and external services, featuring built-in GitHub OAuth 2.1 authentication, role-based tool access control, dynamic fallback analytics, serverless AI image generation, and third-party REST/GraphQL integrations.
 
-You can deploy it to your own Cloudflare account, and after you create your own Github OAuth client app, you'll have a fully functional remote MCP server that you can build off. Users will be able to connect to your MCP server by signing in with their GitHub account.
+---
 
-You can use this as a reference example for how to integrate other OAuth providers with an MCP server deployed to Cloudflare, using the [`workers-oauth-provider` library](https://github.com/cloudflare/workers-oauth-provider).
+## Overview
 
-The MCP server (powered by [Cloudflare Workers](https://developers.cloudflare.com/workers/)):
+The Model Context Protocol (MCP) allows Large Language Models (LLMs) to query external context and execute tools dynamically. This server exposes a remote MCP endpoint over Server-Sent Events (SSE) hosted on Cloudflare Workers.
 
-- Acts as OAuth _Server_ to your MCP clients
-- Acts as OAuth _Client_ to your _real_ OAuth server (in this case, GitHub)
+To prevent unauthorized access, the server integrates `@cloudflare/workers-oauth-provider` to manage OAuth 2.1 authentication. When an MCP client attempts to connect, users complete a secure GitHub OAuth authorization flow before tool capabilities are granted. User identity and session tokens are stored securely in Cloudflare Durable Objects and KV storage, allowing fine-grained access control to privileged tools.
 
-> [!WARNING]
-> This is a demo template designed to help you get started quickly. While we have implemented several security controls, **you must implement all preventive and defense-in-depth security measures before deploying to production**. Please review our comprehensive security guide: [Securing MCP Servers](https://github.com/cloudflare/agents/blob/main/docs/securing-mcp-servers.md)
+---
+
+## Architecture and Key Technical Features
+
+### Serverless Architecture at the Edge
+- **Cloudflare Workers**: Edge runtime hosting for sub-millisecond routing and high availability without cold starts.
+- **Cloudflare Durable Objects (`McpAgent`)**: Provides persistent, stateful SSE connection management and session context preservation across requests.
+- **Cloudflare KV (`OAUTH_KV`)**: Stores encrypted OAuth states, authorization requests, and client consent tokens.
+
+### OAuth 2.1 Server and Upstream Authentication
+- Acts as an **OAuth 2.1 Server** to connecting MCP clients (e.g., Claude Desktop, Cursor).
+- Acts as an **OAuth Client** to GitHub's OAuth server.
+- Built-in CSRF protection with state binding cookies (`__Host-CONSENTED_STATE`).
+- Client approval dialog with remembered authorization states to minimize friction on repeated logins.
+
+### Role-Based Access Control (RBAC)
+- Restricted tools (such as image generation and analytics queries) require user authentication against an explicit list of allowed GitHub handles (`ALLOWED_USERNAMES`).
+- Unauthenticated or unauthorized accounts are gracefully restricted to public utility tools.
+
+### Multi-Service API & AI Integrations
+- **Cloudflare Workers AI**: Executes the `@cf/black-forest-labs/flux-1-schnell` image generation model directly on edge GPUs.
+- **Cloudflare GraphQL Analytics API**: Retrieves zone domain analytics (requests, page views, bandwidth, TTFB latency) with automatic query fallback cascades for handling plan differences.
+- **GitHub Octokit API**: Queries authenticated user profiles and permissions.
+- **eBird API**: Fetches real-time geospatial bird observation records with customizable search radius and historical range.
+- **USDA FoodData Central API**: Provides full-text searching and nutrient profiling for agricultural and branded food items.
+
+---
+
+## Available MCP Tools
+
+| Tool Name | Access Control | Description |
+| --- | --- | --- |
+| `add` | Public | Utility tool that calculates the sum of two numbers. |
+| `getDomainStatistics` | Restricted | Fetches zone analytics (requests, views, bandwidth, TTFB) from Cloudflare GraphQL API with automatic fallback handling. |
+| `userInfoOctokit` | Restricted | Retrieves authenticated GitHub user details using the session OAuth token via Octokit. |
+| `generateImage` | Restricted | Generates images from text prompts using the FLUX.1 Schnell model on Cloudflare Workers AI. |
+| `getNearbyBirds` | Restricted | Queries recent bird observations within a geographic radius using the eBird API. |
+| `searchFood` | Restricted | Searches the USDA FoodData Central database for food items by keyword and type filters. |
+| `getFoodDetails` | Restricted | Retrieves detailed composition and nutrient profiles for a specific FoodData Central ID (`fdcId`). |
+
+---
+
+## System Flow
+
+```
+[ MCP Client ] 
+    |
+    | (1) Connect /sse
+    v
+[ Cloudflare Worker ] ---> (2) Check Authorization Header
+    |                             |
+    | (Missing/Invalid)           | (Valid Token)
+    v                             v
+[ OAuth Approval Dialog ]     [ Durable Object (MyMCP) ]
+    |                             |
+    | (3) GitHub OAuth            | (4) Execute Tool & Fetch APIs
+    v                             +---> Cloudflare Workers AI (FLUX)
+[ GitHub Identity Provider ]      +---> Cloudflare GraphQL Analytics
+                                  +---> GitHub Octokit API
+                                  +---> eBird / USDA APIs
+```
+
+---
+
+## Tech Stack
+
+- **Runtime & Deployment**: Cloudflare Workers, Cloudflare Durable Objects, Cloudflare KV
+- **Language**: TypeScript, Node.js compatibility layer
+- **Frameworks & Libraries**: Hono, `@modelcontextprotocol/sdk`, `@cloudflare/workers-oauth-provider`, `agents`, Octokit, Zod
+- **AI & Analytics**: Cloudflare Workers AI (`flux-1-schnell`), Cloudflare GraphQL Analytics API
+- **Tooling**: Wrangler CLI, TypeScript, MCP Inspector
+
+---
 
 ## Getting Started
 
-Clone the repo directly & install dependencies: `npm install`.
+### Prerequisites
 
-Alternatively, you can use the command line below to get the remote MCP Server created on your local machine:
+- Node.js (v18 or higher)
+- Cloudflare account with Wrangler CLI configured (`npx wrangler login`)
+- GitHub account to create an OAuth Application
 
+### Installation
+
+1. Clone the repository and install dependencies:
+   ```bash
+   git clone https://github.com/superjeffc/mcp-tools-server.git
+   cd mcp-tools-server
+   npm install
+   ```
+
+2. Generate TypeScript types for Cloudflare Worker bindings:
+   ```bash
+   npm run cf-typegen
+   ```
+
+---
+
+## Local Development Setup
+
+To test the server locally, create a local GitHub OAuth App and configure environment variables.
+
+### 1. Register Local GitHub OAuth Application
+- Go to **GitHub Settings** > **Developer Settings** > **OAuth Apps** > **New OAuth App**.
+- Set **Application Name**: `Local Remote MCP Server`
+- Set **Homepage URL**: `http://localhost:8788`
+- Set **Authorization callback URL**: `http://localhost:8788/callback`
+- Save the **Client ID** and generate a **Client Secret**.
+
+### 2. Configure Local Environment
+Create a `.dev.vars` file in the project root:
+```ini
+GITHUB_CLIENT_ID=your_local_github_client_id
+GITHUB_CLIENT_SECRET=your_local_github_client_secret
+COOKIE_ENCRYPTION_KEY=a_random_32_byte_hex_string
+CF_API_TOKEN=your_optional_cloudflare_api_token
+CF_ZONE_ID=your_optional_cloudflare_zone_id
+EBIRD_API_TOKEN=your_optional_ebird_api_token
+USDA_API_KEY=your_optional_usda_api_key
+```
+
+### 3. Start Local Development Server
 ```bash
-npm create cloudflare@latest -- my-mcp-server --template=cloudflare/ai/demos/remote-mcp-github-oauth
+npm run dev
 ```
+The local server runs at `http://localhost:8788`.
 
-### For Production
-
-Create a new [GitHub OAuth App](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app):
-
-- For the Homepage URL, specify `https://mcp-github-oauth.<your-subdomain>.workers.dev`
-- For the Authorization callback URL, specify `https://mcp-github-oauth.<your-subdomain>.workers.dev/callback`
-- Note your Client ID and generate a Client secret.
-- Set secrets via Wrangler
-
+### 4. Test via MCP Inspector
+Launch the official MCP Inspector:
 ```bash
-wrangler secret put GITHUB_CLIENT_ID
-wrangler secret put GITHUB_CLIENT_SECRET
-wrangler secret put COOKIE_ENCRYPTION_KEY # add any random string here e.g. openssl rand -hex 32
-```
-
-> [!IMPORTANT]
-> When you create the first secret, Wrangler will ask if you want to create a new Worker. Submit "Y" to create a new Worker and save the secret.
-
-#### Set up a KV namespace
-
-- Create the KV namespace:
-  `wrangler kv namespace create "OAUTH_KV"`
-- Update the Wrangler file with the KV ID
-
-#### Deploy & Test
-
-Deploy the MCP server to make it available on your workers.dev domain
-` wrangler deploy`
-
-Test the remote server using [Inspector](https://modelcontextprotocol.io/docs/tools/inspector):
-
-```
 npx @modelcontextprotocol/inspector@latest
 ```
+Connect to `http://localhost:8788/sse`. Follow the browser login prompt to complete GitHub authentication and test tool execution.
 
-Enter `https://mcp-github-oauth.<your-subdomain>.workers.dev/sse` and hit connect. Once you go through the authentication flow, you'll see the Tools working:
+---
 
-<img width="640" alt="image" src="https://github.com/user-attachments/assets/7973f392-0a9d-4712-b679-6dd23f824287" />
+## Production Deployment Guide
 
-You now have a remote MCP server deployed!
+### 1. Register Production GitHub OAuth Application
+- Create a new OAuth App in GitHub Developer Settings.
+- Set **Homepage URL**: `https://<your-worker-name>.<your-subdomain>.workers.dev`
+- Set **Authorization callback URL**: `https://<your-worker-name>.<your-subdomain>.workers.dev/callback`
 
-### Access Control
-
-This MCP server uses GitHub OAuth for authentication. All authenticated GitHub users can access basic tools like "add" and "userInfoOctokit".
-
-The "generateImage" tool is restricted to specific GitHub users listed in the `ALLOWED_USERNAMES` configuration:
-
-```typescript
-// Add GitHub usernames for image generation access
-const ALLOWED_USERNAMES = new Set(["yourusername", "teammate1"]);
+### 2. Configure Cloudflare KV Namespace
+Create the KV namespace for storing OAuth states:
+```bash
+npx wrangler kv namespace create "OAUTH_KV"
+```
+Copy the returned namespace `id` into `wrangler.jsonc`:
+```json
+"kv_namespaces": [
+  {
+    "binding": "OAUTH_KV",
+    "id": "<your-kv-namespace-id>"
+  }
+]
 ```
 
-### Access the remote MCP server from Claude Desktop
-
-Open Claude Desktop and navigate to Settings -> Developer -> Edit Config. This opens the configuration file that controls which MCP servers Claude can access.
-
-Replace the content with the following configuration. Once you restart Claude Desktop, a browser window will open showing your OAuth login page. Complete the authentication flow to grant Claude access to your MCP server. After you grant access, the tools will become available for you to use.
-
+### 3. Set Production Secrets
+Store secrets securely in Cloudflare using Wrangler:
+```bash
+npx wrangler secret put GITHUB_CLIENT_ID
+npx wrangler secret put GITHUB_CLIENT_SECRET
+npx wrangler secret put COOKIE_ENCRYPTION_KEY
+npx wrangler secret put CF_API_TOKEN
+npx wrangler secret put CF_ZONE_ID
+npx wrangler secret put EBIRD_API_TOKEN
+npx wrangler secret put USDA_API_KEY
 ```
+
+### 4. Deploy to Cloudflare Workers
+```bash
+npm run deploy
+```
+
+---
+
+## Client Configuration Instructions
+
+### Claude Desktop Integration
+
+Add the remote MCP server to your `claude_desktop_config.json`:
+
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
 {
   "mcpServers": {
-    "math": {
+    "mcp-tools-server": {
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp-github-oauth.<your-subdomain>.workers.dev/sse"
+        "https://<your-worker-name>.<your-subdomain>.workers.dev/sse"
       ]
     }
   }
 }
 ```
+After restarting Claude Desktop, complete the pop-up browser authentication. Once authorized, tools will appear under the MCP tool menu.
 
-Once the Tools (under 🔨) show up in the interface, you can ask Claude to use them. For example: "Could you use the math tool to add 23 and 19?". Claude should invoke the tool and show the result generated by the MCP server.
+### Cursor & Windsurf Integration
 
-### For Local Development
+For Cursor, navigate to **Settings** > **MCP Servers** > **Add New MCP Server**:
+- **Name**: `mcp-tools-server`
+- **Type**: `command`
+- **Command**: `npx mcp-remote https://<your-worker-name>.<your-subdomain>.workers.dev/sse`
 
-If you'd like to iterate and test your MCP server, you can do so in local development. This will require you to create another OAuth App on GitHub:
+---
 
-- For the Homepage URL, specify `http://localhost:8788`
-- For the Authorization callback URL, specify `http://localhost:8788/callback`
-- Note your Client ID and generate a Client secret.
-- Create a `.dev.vars` file in your project root with:
+## Security & Defense in Depth
+
+- **State Validation & Session Binding**: Prevents authorization code injection and CSRF attacks by binding state tokens to browser session cookies.
+- **Secret Encryption**: Sensitive properties are encrypted via `COOKIE_ENCRYPTION_KEY` before being transmitted to client sessions.
+- **Strict User Scoping**: Privileged tools assess user identity via `this.props.login` against an explicit set of allowed handles.
+
+---
+
+## Project Structure
 
 ```
-GITHUB_CLIENT_ID=your_development_github_client_id
-GITHUB_CLIENT_SECRET=your_development_github_client_secret
+.
+├── src/
+│   ├── index.ts              # Core Durable Object (MyMCP), tool definitions, and worker entrypoint
+│   ├── github-handler.ts     # Hono OAuth 2.1 routes (/authorize, /callback)
+│   ├── utils.ts              # OAuth helper methods and upstream request builders
+│   └── workers-oauth-utils.ts# CSRF, state management, and cookie binding utilities
+├── package.json              # Dependencies and build scripts
+├── tsconfig.json             # TypeScript compiler settings
+├── wrangler.jsonc            # Cloudflare Worker, Durable Object, and KV bindings
+└── README.md                 # Project documentation
 ```
 
-#### Develop & Test
+---
 
-Run the server locally to make it available at `http://localhost:8788`
-`wrangler dev`
+## License & Copyright
 
-To test the local server, enter `http://localhost:8788/sse` into Inspector and hit connect. Once you follow the prompts, you'll be able to "List Tools".
+Copyright (c) 2026 Jeff Chan. All Rights Reserved.
 
-#### Using Claude and other MCP Clients
-
-When using Claude to connect to your remote MCP server, you may see some error messages. This is because Claude Desktop doesn't yet support remote MCP servers, so it sometimes gets confused. To verify whether the MCP server is connected, hover over the 🔨 icon in the bottom right corner of Claude's interface. You should see your tools available there.
-
-#### Using Cursor and other MCP Clients
-
-To connect Cursor with your MCP server, choose `Type`: "Command" and in the `Command` field, combine the command and args fields into one (e.g. `npx mcp-remote https://<your-worker-name>.<your-subdomain>.workers.dev/sse`).
-
-Note that while Cursor supports HTTP+SSE servers, it doesn't support authentication, so you still need to use `mcp-remote` (and to use a STDIO server, not an HTTP one).
-
-You can connect your MCP server to other MCP clients like Windsurf by opening the client's configuration file, adding the same JSON that was used for the Claude setup, and restarting the MCP client.
-
-## How does it work?
-
-#### OAuth Provider
-
-The OAuth Provider library serves as a complete OAuth 2.1 server implementation for Cloudflare Workers. It handles the complexities of the OAuth flow, including token issuance, validation, and management. In this project, it plays the dual role of:
-
-- Authenticating MCP clients that connect to your server
-- Managing the connection to GitHub's OAuth services
-- Securely storing tokens and authentication state in KV storage
-
-#### Durable MCP
-
-Durable MCP extends the base MCP functionality with Cloudflare's Durable Objects, providing:
-
-- Persistent state management for your MCP server
-- Secure storage of authentication context between requests
-- Access to authenticated user information via `this.props`
-- Support for conditional tool availability based on user identity
-
-#### MCP Remote
-
-The MCP Remote library enables your server to expose tools that can be invoked by MCP clients like the Inspector. It:
-
-- Defines the protocol for communication between clients and your server
-- Provides a structured way to define tools
-- Handles serialization and deserialization of requests and responses
-- Maintains the Server-Sent Events (SSE) connection between clients and your server
+All rights reserved to Jeff Chan. No part of this repository or its associated software may be reproduced, distributed, or transmitted in any form or by any means without the prior written permission of the copyright holder.
